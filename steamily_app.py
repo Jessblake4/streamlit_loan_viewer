@@ -10,10 +10,17 @@
 # - Optional tabs for full parsed data + raw JSON
 # - Requires a password before use (set in .env or st.secrets)
 #
-# How to run
-#   1) Install deps:  pip install streamlit requests pandas python-dateutil python-dotenv
-#   2) Create .env with:  ATTOM_API_KEY="YOUR_API_KEY" and APP_PASSWORD="mypassword"
-#   3) Run:  streamlit run streamlit_app.py
+# How to run (local)
+#   1) pip install streamlit requests pandas python-dateutil python-dotenv
+#   2) .env:
+#        ATTOM_API_KEY="YOUR_API_KEY"
+#        APP_PASSWORD="mypassword"
+#   3) streamlit run streamlit_app.py
+#
+# How to deploy (Streamlit Cloud)
+#   - In app Secrets, add:
+#       ATTOM_API_KEY = "YOUR_API_KEY"
+#       app_password  = "mypassword"
 
 from __future__ import annotations
 
@@ -76,7 +83,8 @@ DATE_KEYS = {"documentDate", "recordingDate", "saleDate", "saleTransDate", "sale
 def get_api_key() -> str | None:
     key = os.getenv("ATTOM_API_KEY")
     if not key and hasattr(st, "secrets"):
-        key = st.secrets.get("attom", {}).get("api_key")
+        # support either plain or namespaced secret
+        key = st.secrets.get("ATTOM_API_KEY") or st.secrets.get("attom", {}).get("api_key")
     return key
 
 
@@ -234,19 +242,17 @@ if check_password():
         st.markdown("<div class='section'>", unsafe_allow_html=True)
         st.markdown("#### 🔎 Look up an address")
         with st.form("addr_form"):
-            ex1, ex2 = "1111 11th St SE", "Chicago, IL 60007"
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                street = st.text_input("Street Address (Address1)", placeholder=f"e.g., {ex1}")
-            with col2:
-                address2_raw = st.text_input("Address2 (optional)", placeholder=f"e.g., APT 101")
+            ex1 = "1111 11th St SE"
+            street = st.text_input("Street Address (Address1)", placeholder=f"e.g., {ex1}")
+
             c1, c2, c3 = st.columns(3)
             with c1:
                 city = st.text_input("City", placeholder="Chicago")
             with c2:
                 state = st.text_input("State (2-letter)", max_chars=2, placeholder="IL")
             with c3:
-                zipcode = st.text_input("ZIP", placeholder="60007")
+                zipcode = st.text_input("ZIP (optional)", placeholder="60007")
+
             submitted = st.form_submit_button("Fetch History", use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -257,53 +263,73 @@ if check_password():
         if not street:
             st.error("Street Address is required.")
             st.stop()
-        address2 = address2_raw.strip()
-        if not address2 and (city or state or zipcode):
-            parts = []
-            if city: parts.append(city.strip())
-            if state: parts.append(state.strip().upper())
-            line = ", ".join(parts)
-            if zipcode: line = f"{line} {zipcode.strip()}" if line else zipcode.strip()
-            address2 = line
-        if not address2:
-            st.warning("Provide Address2 directly or fill City/State/ZIP to construct it.")
+
+        # Build address2 automatically from City/State/ZIP
+        parts = []
+        if city: parts.append(city.strip())
+        if state: parts.append(state.strip().upper())
+        address2 = ", ".join(parts)
+        if zipcode:
+            address2 = f"{address2} {zipcode.strip()}" if address2 else zipcode.strip()
+
+        # Require at least City + State for a valid ATTOM call
+        if not (city and state):
+            st.warning("Please enter City and State (ZIP optional).")
             st.stop()
+
         st.markdown("### Results for ")
         st.caption(f"**{street}**, **{address2}**")
+
         with st.spinner("Calling ATTOM API…"):
             data, resp = fetch_attom(street, address2, api_key)
+
         try:
             records = harvest_records(data)
             df = make_dataframe(records)
         except Exception as e:
             st.error(f"Failed to parse response: {e}")
             st.stop()
+
+        # Friendly summary card
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         focus_preview = make_focus_loans_table(df)
         total_rows = len(df) if not df.empty else 0
         loan_rows = len(focus_preview) if isinstance(focus_preview, pd.DataFrame) else 0
-        st.markdown(f"**Found** <span class='pill'>{loan_rows} loan rows</span> in <span class='pill'>{total_rows} parsed records</span>.", unsafe_allow_html=True)
+        st.markdown(
+            f"**Found** <span class='pill'>{loan_rows} loan rows</span> "
+            f"in <span class='pill'>{total_rows} parsed records</span>.",
+            unsafe_allow_html=True,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
+
         tabs = st.tabs(["Loan Summary", "Full Parsed", "Raw JSON"])
+
         with tabs[0]:
             st.markdown("##### 📑 Loan Summary (Purchase Date / Loan Type / Lender)")
             focus = focus_preview
             if focus.empty:
                 st.info("No loan-type/lender records detected. Use the Full Parsed or Raw JSON tabs to investigate.")
             else:
-                left, right = st.columns([2,2])
+                left, right = st.columns([2, 2])
                 with left:
-                    years = sorted(list({int(y) for y in focus["Year"].dropna().unique()}), reverse=True) if "Year" in focus.columns else []
+                    years = (
+                        sorted(list({int(y) for y in focus["Year"].dropna().unique()}), reverse=True)
+                        if "Year" in focus.columns else []
+                    )
                     year_filter = st.multiselect("Filter by Year", options=years, default=years[:10] if years else [])
                 with right:
                     lenders = sorted(list({str(x) for x in focus.get("Lender Name", pd.Series(dtype=str)).dropna().unique()}))
                     lender_filter = st.multiselect("Filter by Lender", options=lenders)
+
                 filtered = focus.copy()
                 if year_filter and "Year" in filtered.columns:
                     filtered = filtered[filtered["Year"].isin(year_filter)]
                 if lender_filter and "Lender Name" in filtered.columns:
                     filtered = filtered[filtered["Lender Name"].isin(lender_filter)]
+
                 st.dataframe(filtered, use_container_width=True)
+
+                # Downloads
                 c1, c2 = st.columns(2)
                 csv = filtered.to_csv(index=False).encode("utf-8")
                 json_str = filtered.to_json(orient="records")
@@ -311,18 +337,25 @@ if check_password():
                     st.download_button("Download CSV", data=csv, file_name="attom_loan_summary.csv", mime="text/csv", use_container_width=True)
                 with c2:
                     st.download_button("Download JSON", data=json_str, file_name="attom_loan_summary.json", mime="application/json", use_container_width=True)
+
         with tabs[1]:
             st.markdown("##### 🧩 Full Parsed Records (for deeper analysis)")
             if df.empty:
                 st.info("Nothing parsed.")
             else:
-                preferred = ["documentDate", "recordingDate", "saleDate", "loanAmount", "loanType", "lienType", "interestRate", "loanTerm", "loanToValue", "lenderName", "buyerName", "sellerName", "docNumber", "salePrice"]
+                preferred = [
+                    "documentDate", "recordingDate", "saleDate",
+                    "loanAmount", "loanType", "lienType", "interestRate", "loanTerm", "loanToValue",
+                    "lenderName", "buyerName", "sellerName", "docNumber", "salePrice",
+                ]
                 ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
                 st.dataframe(df[ordered], use_container_width=True)
+
         with tabs[2]:
             st.markdown("##### 🛠️ Raw JSON (advanced)")
             st.caption("Troubleshoot field mappings or verify values.")
             st.code(json.dumps(data, indent=2)[:200000], language="json")
+
     # ------------------------- FOOTER -------------------------
     st.write("")
     st.markdown(
