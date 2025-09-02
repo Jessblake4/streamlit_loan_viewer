@@ -251,7 +251,7 @@ if check_password():
             with c2:
                 state = st.text_input("State (2-letter)", max_chars=2, placeholder="IL")
             with c3:
-                zipcode = st.text_input("ZIP (optional)", placeholder="60007")
+                zipcode = st.text_input("ZIP", placeholder="60007")
 
             submitted = st.form_submit_button("Fetch History", use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
@@ -274,7 +274,7 @@ if check_password():
 
         # Require at least City + State for a valid ATTOM call
         if not (city and state):
-            st.warning("Please enter City and State (ZIP optional).")
+            st.warning("Please enter City, State and Zip")
             st.stop()
 
         st.markdown("### Results for ")
